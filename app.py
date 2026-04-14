@@ -4,45 +4,100 @@ import re
 from PyPDF2 import PdfReader
 from sklearn.metrics.pairwise import cosine_similarity
 import spacy
-from spacy.matcher import PhraseMatcher
+from sentence_transformers import SentenceTransformer
 
+# Load NLP model
 nlp = spacy.load("en_core_web_sm")
-skills_list = ["python", "machine learning", "sql", "aws", "data analysis"]
+bert_model = SentenceTransformer('all-MiniLM-L6-v2')
+# Stopwords
+stopwords = set([
+    "project", "experience", "company", "team",
+    "work", "role", "year", "india", "user",
+    "users", "application", "data", "system"
+])
 
-matcher = PhraseMatcher(nlp.vocab)
-patterns = [nlp(skill) for skill in skills_list]
-matcher.add("SKILLS", patterns)
-def extract_skills_spacy(text):
-    doc = nlp(text)
-    matches = matcher(doc)
+# Known tech keywords (used as boost, NOT restriction)
+tech_keywords = [
+    "python", "java", "sql", "aws", "docker", "linux",
+    "machine learning", "deep learning", "html", "css",
+    "javascript", "react", "node", "mongodb", "c++",
+    "tensorflow", "pandas", "numpy", "kubernetes", "redis"
+]
+
+# -------- SKILL EXTRACTION --------
+
+def extract_skills_auto(text):
+    doc = nlp(text[:1000])
     
     skills = set()
-    for _, start, end in matches:
-        skills.add(doc[start:end].text.lower())
+    
+    for token in doc:
+        if token.pos_ in ["NOUN", "PROPN"] and not token.is_stop:
+            word = token.text.lower()
+            
+            if len(word) > 2 and word not in stopwords:
+                skills.add(word)
     
     return list(skills)
-#  Load model ONCE (important for speed)
+
+def extract_skills_smart(text):
+    auto_skills = extract_skills_auto(text)
+    final_skills = set()
+
+    for word in auto_skills:
+        # Keep if:
+        # 1. Known tech keyword
+        # 2. OR looks like technical (alphabetic, not junk)
+        if word in tech_keywords or word.isalpha():
+            final_skills.add(word)
+
+    # Ensure multi-word keywords are also captured
+    for skill in tech_keywords:
+        if skill in text.lower():
+            final_skills.add(skill)
+
+    return list(final_skills)
+
+# -------- LOAD MODELS --------
+
 model = joblib.load("resume_model.pkl")
 tfidf = joblib.load("tfidf.pkl")
 
-# Clean text
+# -------- TEXT CLEANING --------
+def normalize_text(text):
+    text = text.lower()
+    
+    replacements = {
+        "ml": "machine learning",
+        "dl": "deep learning",
+        "js": "javascript",
+        "py": "python"
+    }
+
+    for k, v in replacements.items():
+        text = text.replace(k, v)
+
+    return text
+
 def clean_text(text):
     text = str(text).lower()
-    text = re.sub(r'[^a-z\s]', ' ', text)
+    text = re.sub(r'[^a-zA-Z0-9\s\+\#\.]', ' ', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
-# Extract PDF text
+# -------- PDF EXTRACTION --------
+
 def extract_pdf(file):
-    reader = PdfReader(file.name)   #  important fix
+    reader = PdfReader(file.name)
     text = ""
     for page in reader.pages:
         page_text = page.extract_text()
         if page_text:
             text += page_text
-    return text[:3000]   #  limit size for speed
+    return text
 
-# Main ranking function
+# -------- MAIN FUNCTION --------
+
 def rank_resumes(files, job_desc):
 
     if not files:
@@ -52,38 +107,71 @@ def rank_resumes(files, job_desc):
         return "❌ Please enter a job description"
 
     jd_clean = clean_text(job_desc)
-    jd_vec = tfidf.transform([jd_clean])
+    jd_vec = bert_model.encode(normalize_text(job_desc))
 
     results = []
+    jd_skills = extract_skills_smart(job_desc)
 
-    # limit files to avoid lag
     for file in files:
         try:
             text = extract_pdf(file)
             cleaned = clean_text(text)
-            skills = extract_skills_spacy(text)
-            resume_vec = tfidf.transform([cleaned])
-            score = cosine_similarity(jd_vec, resume_vec)[0][0]
+            skills = extract_skills_smart(text)
 
-            results.append((file.name.split("\\")[-1], score))
+            resume_vec = bert_model.encode(normalize_text(text))
+            prediction = "N/A"
+            score = cosine_similarity([jd_vec], [resume_vec])[0][0]
+
+            # Skill match
+            if jd_skills:
+                skill_match = len(set(skills) & set(jd_skills)) / len(jd_skills)
+            else:
+                skill_match = 0
+
+            final_score = (score + skill_match) / 2
+
+            results.append((file.name.split("\\")[-1], final_score, skills, prediction))
 
         except Exception as e:
-            results.append((file.name, 0))
+            results.append((file.name.split("\\")[-1], 0, [], "Error"))
 
-    # Sort by score
+    # Sort results
     results.sort(key=lambda x: x[1], reverse=True)
+    
+    # 🔥 NORMALIZE SCORES (ADD THIS BLOCK HERE)
+    # scores = [r[1] for r in results]
+    # min_s = min(scores)
+    # max_s = max(scores)
 
-    # Format output nicely
-    output = " Resume Ranking:\n\n"
-    for i, (name, score) in enumerate(results, 1):
-        output += f"{i}. {name} → {round(score,2)}\n"
+    # if max_s - min_s == 0:
+    #    max_s += 1e-6
+
+
+    # new_results = []
+    # for name, score, skills, pred in results:
+    #    norm_score = (score - min_s) / (max_s - min_s + 1e-6)
+    #    norm_score = 0.1 + 0.8 * norm_score
+    #    new_results.append((name, norm_score, skills, pred))
+
+    # results = new_results
+
+    # Output
+    output = "## 📊 Resume Ranking\n\n"
+
+    if results:
+        best = results[0]
+        output += f"## 🏆 Best Candidate: {best[0]} (Score: {best[1]*100:.1f}%)\n\n"
+
+    for i, (name, score, skills, _) in enumerate(results, 1):
+        output += f"### {i}. {name}\n"
+        output += f"Score: {score*100:.1f}%\n\n"
 
     return output
 
-# UI
-with gr.Blocks() as app:
-    gr.Markdown("#  Resume Ranking System")
+# -------- UI --------
 
+with gr.Blocks() as app:
+    gr.Markdown("# Shortlistr")
     gr.Markdown("### Enter Job Description and Upload Multiple Resumes")
 
     job_desc = gr.Textbox(
@@ -96,9 +184,9 @@ with gr.Blocks() as app:
         label="📂 Upload Multiple Resume PDFs"
     )
 
-    output = gr.Textbox(label=" Ranking Result")
+    output = gr.Markdown(label="Ranking Result")
 
-    btn = gr.Button(" Rank Resumes")
+    btn = gr.Button("Rank Resumes")
 
     btn.click(
         fn=rank_resumes,
