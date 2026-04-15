@@ -28,7 +28,9 @@ def clean_text(text):
 
 # Apply cleaning
 df['text_features'] = (
-    df['skills'].fillna('') + ' ' +
+    df['skills_required'].fillna('') + ' ' +        # JD skills
+    df['responsibilities.1'].fillna('') + ' ' +     # JD responsibilities
+    df['skills'].fillna('') + ' ' +                 # Resume skills
     df['career_objective'].fillna('') + ' ' +
     df['responsibilities'].fillna('')
 )
@@ -38,9 +40,9 @@ df['cleaned_resume'] = df['text_features'].apply(clean_text)
 print("\nSample cleaned text:")
 print(df['cleaned_resume'][0][:200])
 def score_to_label(score):
-    if score >= 0.75:
+    if score >= 0.80:
         return 'High'
-    elif score >= 0.5:
+    elif score >= 0.60:
         return 'Medium'
     else:
         return 'Low'
@@ -53,7 +55,7 @@ print(df['label'].value_counts())
 # 4. TF-IDF
 from sklearn.feature_extraction.text import TfidfVectorizer
 
-tfidf = TfidfVectorizer(max_features=3000, stop_words='english')
+tfidf = TfidfVectorizer(max_features=1500, stop_words='english')
 X = tfidf.fit_transform(df['cleaned_resume'])
 
 # 5. Encode labels
@@ -74,7 +76,7 @@ from sklearn.ensemble import VotingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
 from sklearn.metrics import accuracy_score
-svm = SVC(kernel='linear', probability=True)
+svm = SVC(kernel='linear', probability=True, max_iter=1000)
 
 lr = LogisticRegression(max_iter=1000)
 
@@ -93,6 +95,11 @@ ensemble_model.fit(X_train, y_train)
 y_pred = ensemble_model.predict(X_test)
 
 print("Ensemble Accuracy:", accuracy_score(y_test, y_pred))
+
+import joblib
+joblib.dump(ensemble_model, "resume_model.pkl")
+joblib.dump(tfidf, "tfidf.pkl")
+print("Models saved!")
 
 # 8. Prediction function
 def predict_resume(text):
