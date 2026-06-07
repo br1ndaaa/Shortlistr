@@ -71,7 +71,7 @@ X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.2, random_state=42
 )
 
-# 7. ENSEMBLE MODEL (MAIN PART)
+# 7. ENSEMBLE MODEL
 from sklearn.ensemble import VotingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
